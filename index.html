@@ -17,11 +17,11 @@
   .sub{color:var(--muted);font-size:13px;margin-bottom:16px}
   .status{padding:12px 16px;border-radius:10px;font-weight:600;font-size:16px;
           text-align:center;margin-bottom:14px;color:#0b0b0b}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
-  @media(max-width:520px){.cards{grid-template-columns:1fr}}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
   .card{background:var(--card);border-radius:12px;padding:14px}
   .card .lbl{color:var(--muted);font-size:12px}
   .card .val{font-size:32px;font-weight:600;margin:6px 0;font-variant-numeric:tabular-nums}
+  .card .diag{font-size:12px;color:var(--muted);min-height:16px}
   .bar{height:8px;background:var(--track);border-radius:4px;overflow:hidden}
   .bar>i{display:block;height:100%;width:0;border-radius:4px;transition:width .4s,background .4s}
   .panel{background:var(--card);border-radius:12px;padding:14px;margin-bottom:16px}
@@ -32,7 +32,6 @@
   button:disabled{opacity:.5;cursor:default}
   .exp-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
   .exp-controls label{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
-  /* caixa de altura fixa: impede o canvas de crescer sem parar */
   .chartbox{position:relative;width:100%;height:220px}
   .chartbox>canvas{display:block}
   .foot{color:var(--muted);font-size:12px;text-align:center;margin-top:10px}
@@ -53,6 +52,8 @@
       <div class="val" id="v-temp">--</div><div class="bar"><i id="b-temp"></i></div></div>
     <div class="card"><div class="lbl">Vibracao (g)</div>
       <div class="val" id="v-vibr">--</div><div class="bar"><i id="b-vibr"></i></div></div>
+    <div class="card"><div class="lbl">Frequencia vib (Hz)</div>
+      <div class="val" id="v-freq">--</div><div class="diag" id="t-freq">--</div></div>
   </div>
 
   <div class="panel">
@@ -62,6 +63,7 @@
         <option value="corrente">Corrente (A)</option>
         <option value="temperatura">Temperatura (C)</option>
         <option value="vibracao">Vibracao (g)</option>
+        <option value="freq_vibracao">Frequencia (Hz)</option>
       </select>
     </div>
     <div class="chartbox"><canvas id="grafico"></canvas></div>
@@ -91,14 +93,14 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// limites (iguais aos do firmware) para colorir e dimensionar as barras
 const LIM = {
   corrente:{alerta:5.0, crit:7.0},
   temperatura:{alerta:60, crit:75},
-  vibracao:{alerta:0.15, crit:0.35}
+  vibracao:{alerta:0.25, crit:0.40}
 };
 const CASAS = {corrente:1, temperatura:1, vibracao:2};
 const ALVO  = {corrente:'corrente', temperatura:'temp', vibracao:'vibr'};
+const ROT_HZ = 1040/60;   // rotacao do motor = 17,33 Hz (1x)
 
 const CSS = getComputedStyle(document.documentElement);
 const cOk=CSS.getPropertyValue('--ok'), cWarn=CSS.getPropertyValue('--warn'), cCrit=CSS.getPropertyValue('--crit');
@@ -109,6 +111,21 @@ function setCard(k,v){
   const b=document.getElementById('b-'+ALVO[k]);
   b.style.width = (Math.max(0,Math.min(1, v/LIM[k].crit))*100)+'%';
   b.style.background = cor(k,v);
+}
+
+// diagnostico da frequencia de vibracao (mesma logica do firmware)
+function diagFreq(f){
+  if(f==null || f<3) return '--';
+  if(Math.abs(f-120)<12 || Math.abs(f-180)<12) return 'rede (normal)';
+  const r=f/ROT_HZ;
+  if(Math.abs(r-1)<0.15) return '1x - desbalanceamento';
+  if(Math.abs(r-2)<0.15) return '2x - desalinhamento';
+  if(f>100) return 'alta - verificar rolamento';
+  return String(Math.round(f))+' Hz';
+}
+function setFreq(f){
+  document.getElementById('v-freq').textContent = (f==null?'--':Number(f).toFixed(0));
+  document.getElementById('t-freq').textContent = diagFreq(f);
 }
 
 const ESTADO_COR={PARADO:'var(--muted)',RODANDO:'var(--ok)',ALARME:'var(--crit)',EMERGENCIA:'var(--crit)'};
@@ -135,7 +152,6 @@ document.getElementById('sel').addEventListener('change',redesenha);
 // ------- busca periodica -------
 async function atualiza(){
   try{
-    // ultima leitura (valores atuais)
     const {data:atual,error:e1}=await db.from('leituras')
       .select('*').order('data_hora',{ascending:false}).limit(1);
     if(e1) throw e1;
@@ -144,13 +160,13 @@ async function atualiza(){
     if(atual&&atual.length){
       const d=atual[0];
       setCard('corrente',d.corrente); setCard('temperatura',d.temperatura); setCard('vibracao',d.vibracao);
+      setFreq(d.freq_vibracao);
       const st=d.estado||'PARADO', el=document.getElementById('status');
       el.textContent=ESTADO_TXT[st]||st;
       el.style.background=ESTADO_COR[st]||'var(--muted)';
       el.style.color=(st==='ALARME'||st==='EMERGENCIA')?'#fff':'#0b0b0b';
       document.getElementById('ultima').textContent=new Date(d.data_hora).toLocaleTimeString();
     }
-    // historico (ultimos 60 pontos, em ordem cronologica)
     const {data:hist,error:e2}=await db.from('leituras')
       .select('*').order('data_hora',{ascending:false}).limit(60);
     if(e2) throw e2;
@@ -163,11 +179,10 @@ async function atualiza(){
   }
 }
 atualiza();
-setInterval(atualiza, 2000);   // atualiza a cada 2 s
+setInterval(atualiza, 5000);   // atualiza a cada 5 s
 
 // ------- exportacao por intervalo de datas -------
-// datas iniciais = hoje (no fuso local)
-const hoje = new Date().toLocaleDateString('en-CA');   // YYYY-MM-DD
+const hoje = new Date().toLocaleDateString('en-CA');
 document.getElementById('exp-de').value  = hoje;
 document.getElementById('exp-ate').value = hoje;
 document.getElementById('exp-btn').addEventListener('click', exportarCSV);
@@ -179,18 +194,16 @@ async function exportarCSV(){
   const btn = document.getElementById('exp-btn');
   if(!de){ st.textContent = 'Escolha a data inicial.'; return; }
 
-  // intervalo no fuso de Brasilia (-03:00); dia inteiro de 00:00 a 23:59:59
   const ini = de  + 'T00:00:00-03:00';
   const fim = ate + 'T23:59:59-03:00';
 
   st.textContent = 'Buscando...';
   btn.disabled = true;
   try{
-    // pagina de 1000 em 1000 (o Supabase limita cada consulta a 1000 linhas)
     let linhas = [], passo = 1000, pos = 0, lote;
     do{
       const { data, error } = await db.from('leituras')
-        .select('data_hora,corrente,temperatura,vibracao,estado')
+        .select('data_hora,corrente,temperatura,vibracao,freq_vibracao,estado')
         .gte('data_hora', ini).lte('data_hora', fim)
         .order('data_hora', { ascending: true })
         .range(pos, pos + passo - 1);
@@ -202,16 +215,14 @@ async function exportarCSV(){
 
     if(!linhas.length){ st.textContent = 'Nenhum dado nesse periodo.'; return; }
 
-    // CSV com separador ; e virgula decimal (abre certo no Excel pt-BR)
-    const cab = ['Data/hora','Corrente (A)','Temperatura (C)','Vibracao (g)','Estado'];
+    const cab = ['Data/hora','Corrente (A)','Temperatura (C)','Vibracao (g)','Freq vib (Hz)','Estado'];
     const num = v => (v==null ? '' : String(v).replace('.', ','));
     const corpo = linhas.map(r => [
       new Date(r.data_hora).toLocaleString('pt-BR'),
-      num(r.corrente), num(r.temperatura), num(r.vibracao), r.estado || ''
+      num(r.corrente), num(r.temperatura), num(r.vibracao), num(r.freq_vibracao), r.estado || ''
     ].join(';'));
     const csv = '﻿' + [cab.join(';'), ...corpo].join('\n');
 
-    // dispara o download
     const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
     const url  = URL.createObjectURL(blob);
     const a = document.createElement('a');
